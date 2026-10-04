@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -88,4 +91,74 @@ func main() {
 			return runProducers(ctx, pool, jobsPerProducers, metrics)
 		})
 	}
+
+	// run consumer
+	for c := 0; c < cfg.Consumers; c++ {
+		eg.Go(func() error {
+			return runConsumers(ctx, pool, cfg, metrics)
+		})
+	}
+
+	// progress ticker
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				enq := atomic.LoadUint64(&metrics.enquedCount)
+				deq := atomic.LoadUint64(&metrics.dequedCount)
+				fmt.Printf("[Status] Enqueued: %-7d | Processed: %-7d (%.1f%%)\n", enq, deq, float64(deq)/float64(cfg.TotalJobs)*100)
+				if int(deq) >= cfg.TotalJobs {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// wait unitl all target jobs are dqeueed
+	for {
+		if int(atomic.LoadUint64(&metrics.dequedCount)) >= cfg.TotalJobs {
+			cancel()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = eg.Wait()
+	dur := time.Since(start)
+	ticker.Stop()
+
+	printResults(metrics, dur, cfg.TotalJobs)
 }
+
+func runProducers(ctx context.Context, pool *pgxpool.Pool, count int, m *Metrics) error {
+	for i := 0; i < count; i++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"order_id":   rand.Intn(1000000),
+			"user_id":    rand.Intn(50000),
+			"amount_usd": rand.Float64() * 500,
+			"timestamp":  time.Now().UnixNano(),
+		})
+		priority := rand.Intn(100)
+		query := `
+				insert into jobs_queue(queue_name,priority,payload,scheduled_at) 
+				values('order',$1,$2,now())
+
+				`
+		_, err := pool.Exec(ctx, query, priority, payload)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		atomic.AddUint64(&m.enquedCount, 1)
+	}
+	return nil
+}
+
+func runConsumers(ctx context.Context, pool *pgxpool.Pool, cfg BenchmarkConfig, m *Metrics) error {}
