@@ -64,4 +64,3 @@ jobs:
           DATABASE_URL: postgres://root:rootpassword@localhost:5432/db_${{ steps.vars.outputs.db_branch }}
         run: |
           echo "Connecting test harness to $DATABASE_URL"
-          # Run npm test, pytest, cargo test, etc.
